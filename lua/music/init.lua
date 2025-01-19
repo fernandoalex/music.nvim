@@ -1,4 +1,34 @@
+-- TODO break this into multiple files because this is a mess
 local M = {}
+
+local function get_repo_root_dir()
+    local current_file = debug.getinfo(1, "S").source:match("@(.*)")
+    local current_dir = vim.fn.fnamemodify(current_file, ":h")
+    -- Up one level from 'init.lua' => my_plugin/, then up again => repo root.
+    local root_dir = vim.fn.fnamemodify(current_dir, ":h:h")
+    return root_dir
+end
+
+M.repo_root = get_repo_root_dir()
+M.applescripts_dir = M.repo_root .. "/applescripts"
+
+local function run_applescript(script_name, ...)
+    local script_path = M.applescripts_dir .. "/" .. script_name
+
+    -- Build our shell command. We pass each argument to AppleScript in turn.
+    -- AppleScript will receive them in `on run {arg1, arg2, ...}`.
+    local cmd = string.format("osascript %q", script_path)
+    for _, arg in ipairs({ ... }) do
+        cmd = cmd .. " " .. string.format("%q", arg)
+    end
+    cmd = cmd .. " 2>&1"
+
+    local pipe = assert(io.popen(cmd, "r"))
+    local output = pipe:read("*a") or ""
+    pipe:close()
+
+    return output
+end
 
 -- @param script string
 function M.call_music(script)
@@ -6,11 +36,12 @@ function M.call_music(script)
 end
 
 function M.fetch_playlists()
-    local playlists = {}
-    local handle = io.popen('osascript -e \'tell application "Music" to get name of playlists\'')
-    local result = handle:read("*a") -- Read the entire output as a single string
+    local cmd = [[osascript -e 'tell application "Music" to get name of playlists']]
+    local handle = io.popen(cmd)
+    local result = handle:read("*a")
     handle:close()
-    for playlist in string.gmatch(result, '([^,]+)') do
+    local playlists = {}
+    for playlist in result:gmatch('([^,]+)') do
         table.insert(playlists, playlist:match("^%s*(.-)%s*$")) -- Trim whitespace
     end
     return playlists
@@ -21,46 +52,37 @@ end
 function M.make_music_to_list(music_list)
     local music_table = {}
 
-    for chunk in music_list:gmatch("[^,]+") do
+    for chunk in music_list:gmatch("[^\r\n]+") do
         chunk = chunk:match("^%s*(.-)%s*$")
         assert(
-            chunk:match("^(.-)\t+(.*)$"),
+            chunk:match("^(.-)\t(.*)$"),
             "Expected a tab-separated title and artist, but got: " .. chunk
         )
-        local title, artist = chunk:match("^(.-)\t+(.*)$")
-        table.insert(music_table, { title, artist })
+        local title, artist = chunk:match("^(.-)\t(.*)$")
+        table.insert(music_table, { title = title, artist = artist })
     end
 
     return music_table
 end
 
+-- @param playlist_name string
+-- @return table
 function M.fetch_music_from_playlist(playlist_name)
-    local music_list = {}
-    local script = [[
-    osascript -e 'tell application "Music"
-      set songList to {}
-      set theTracks to tracks of playlist "]] .. playlist_name .. [["
-      repeat with aTrack in theTracks
-        set songInfo to {name of aTrack & "\t" & artist of aTrack}
-        set end of songList to songInfo
-      end repeat
-      return songList
-    end tell'
-    ]]
-    local handle = io.popen(script)
-    local result = handle:read("*a")
-    print(result)
-    handle:close()
-
-    M.make_music_to_list(result)
-
-    return music_list
+    local result = run_applescript("fetch_music_from_playlist.applescript", playlist_name)
+    return M.make_music_to_list(result)
 end
 
+-- @param playlist_name string
 function M.play_playlist(playlist_name)
-    local script = string.format('tell application "Music" to play (some playlist whose name is "%s")', playlist_name)
+    -- TODO move this to scripts folder
+    local script = string.format([[
+        tell application "Music"
+            set shuffle enabled to true
+            set shuffle mode to songs
+            play (some playlist whose name is "%s")
+        end tell
+    ]], playlist_name)
     M.call_music(script)
-    M.call_music([[tell application "Music" to shuffle enabled]])
 end
 
 -- @param optional? song {name: string, playlist: string}
@@ -88,6 +110,7 @@ function M.previous_track()
     M.call_music([[tell application "Music" to previous track]])
 end
 
+-- Play a selected playlist
 function M.open_playlist_picker()
     local playlists = M.fetch_playlists()
     require('telescope.pickers').new({}, {
@@ -123,15 +146,12 @@ function M.show_songs_in_new_buffer()
             actions.select_default:replace(function()
                 local selection = action_state.get_selected_entry()
                 actions.close(prompt_bufnr)
-                print(selection[1])
                 local songs = M.fetch_music_from_playlist(selection[1])
                 local formatted_lines = {}
-                print(songs)
                 for _, item in ipairs(songs) do
                     table.insert(formatted_lines, string.format('{title: "%s", artist: "%s"}', item.title, item.artist))
                 end
                 vim.cmd("vnew")
-                print(formatted_lines)
                 vim.api.nvim_buf_set_lines(0, 0, -1, false, formatted_lines)
                 return true
             end)
